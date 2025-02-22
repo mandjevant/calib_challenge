@@ -2,3 +2,5 @@
 /Scripts
 pyvenv.cfg
 /share
+log.txt
+/model
