@@ -4,8 +4,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import os
 from typing import List, Callable,Tuple
+import torch.optim.optimizer
+import torch.optim.sgd
 from torch.utils.data import Dataset
 import torch
+import tqdm
 
 
 class LabelsToNP:
@@ -77,11 +80,11 @@ class HEVCDataloader(Dataset):
         Parameters
         ----------
         file_names: List[str]
-            list of .hevc file names
+            List of .hevc file names
         batch_size: int
-            desired batch size
+            Desired batch size
         transform: Callable
-            transformation to apply
+            Transformation to apply
         """
         self.file_names: List[str] = file_names
         self.batch_size: int = batch_size
@@ -153,8 +156,10 @@ class HEVCDataloader(Dataset):
             if self.transform:
                 frame = self.transform(frame)
 
-            batch_frames.append(frame)
-            batch_labels.append(self.video_labels[self.frame_idx])
+            label = self.video_labels[self.frame_idx]
+            if any([~np.isnan(i) for i in label]):
+                batch_labels.append(label)
+                batch_frames.append(frame)
             self.frame_idx += 1
         
         if len(batch_frames) == 0:
@@ -162,7 +167,7 @@ class HEVCDataloader(Dataset):
         
         batch_frames = np.array(batch_frames)
         batch_frames = torch.from_numpy(batch_frames).permute(0, 3, 1, 2).float()
-        batch_labels = torch.tensor(np.array(batch_labels)).long()
+        batch_labels = torch.tensor(np.array(batch_labels)).float()
 
         if len(batch_labels) < self.batch_size:
             raise StopIteration
@@ -179,13 +184,16 @@ class Net(nn.Module):
     def __init__(self):
         super().__init__()
 
-        self.conv1 = nn.Conv2d(3, 32, kernel_size=5, stride=2, padding=2)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1)
-        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1)
+        self.conv1 = nn.Conv2d(3, 16, kernel_size=5, stride=2, padding=2)
+        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1)
+        self.conv3 = nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1)
+        self.bn1 = nn.BatchNorm2d(16)
+        self.bn2 = nn.BatchNorm2d(32)
+        self.bn3 = nn.BatchNorm2d(64)
         self.pool = nn.MaxPool2d(2, 2)
-        self.dropout = nn.Dropout(0.3)
-        self.fc1 = nn.Linear(128 * 55 * 73, 256)
-        self.fc2 = nn.Linear(256, 2)
+        self.dropout = nn.Dropout(0.1)
+        self.fc1 = nn.Linear(64 * 55 * 73, 128)
+        self.fc2 = nn.Linear(128, 2)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -194,16 +202,16 @@ class Net(nn.Module):
         Parameters
         ----------
         x: torch.Tensor
-            input tensor
+            Input tensor
 
         Returns
         ----------
         torch.Tensor
-            output tensor
+            Output tensor
         """
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = F.relu(self.conv3(x))
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = F.relu(self.bn3(self.conv3(x)))
 
         x = self.pool(x)
         x = self.dropout(x)
@@ -242,13 +250,56 @@ def _test(file_paths: List[str] = ["0.hevc"]) -> None:
     assert output.size() == torch.Size([4, 2]), "Output size is off."
 
 
+def train(file_paths: List[str], model: nn.Module, num_epochs: int, optimizer: torch.optim.Optimizer, criterion: Callable=nn.MSELoss(), batch_size: int=8):
+    """
+    Initiate the dataloader and CNN
+    Define the optimizer and criterion
+
+    Parameters
+    ----------
+    file_paths: List[str]
+        List of file paths
+    model: nn.Module
+        CNN to use
+    optimizer: torch.optim.Optimizer
+        Desired optimizer
+    criterion: Callable
+        Loss criterion
+    batch_size: int
+        Desired batch size
+    """
+    dataloader = HEVCDataloader(file_paths, batch_size)
+    
+    with open("log.txt", "w") as logfile:
+        for epoch in range(num_epochs):
+            running_loss = 0.0
+
+            for inx, (batch_input, batch_labels) in tqdm.tqdm(enumerate(dataloader)):
+                optimizer.zero_grad()
+
+                model_output = model(batch_input)
+                loss = criterion(model_output, batch_labels)
+                loss.backward()
+                optimizer.step()
+
+                running_loss += loss.item()
+
+                logfile.write(str(loss.item()))
+                logfile.write(str(model_output))
+
+                if inx % 5 ==0:
+                    print(f'[{epoch + 1}, {inx + 1:4d}] loss: {running_loss / (200/batch_size):.3f}')
+                    running_loss = 0.0
+
+    torch.save(model.state_dict(), "model/modelParams.pth")
+
+    
+
 if __name__ == "__main__":
     _test()
 
+    num_epochs = 1
+    CNN = Net()
     file_paths = ["0.hevc", "1.hevc", "2.hevc", "3.hevc", "4.hevc"]
-    dataloader = HEVCDataloader(file_paths)
-    CNN_model = Net()
-    
-    for batch_input, batch_labels in dataloader:
-        break
-    
+    optimizer = torch.optim.SGD(CNN.parameters(), lr=0.001, momentum=0.9, weight_decay=0.01)
+    train(file_paths, CNN, num_epochs, optimizer, batch_size=32)
