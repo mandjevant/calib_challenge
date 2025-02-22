@@ -3,7 +3,7 @@ import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 import os
-from typing import List, Callable
+from typing import List, Callable,Tuple
 from torch.utils.data import Dataset
 import torch
 
@@ -12,10 +12,28 @@ class LabelsToNP:
     """
     Read labels from .txt, convert to np.ndarray and save to .npy
     """
+
     def __init__(self, file_name: str):
-        self.file_name: str = file_name[:-5]
+        """
+        Parameters
+        ----------
+        file_name: str
+            File name of .hevc to convert
+        """
+        if file_name[-5:] == ".hevc":
+            self.file_name: str = file_name[:-5]
+        else:
+            self.file_name = file_name
 
     def read_from_txt_convert_to_np(self) -> np.ndarray:
+        """
+        Read each row in the .txt, split on space and convert to array
+
+        Returns
+        -----------
+        np.ndarray
+            Array with labels
+        """
         labels = list()
         with open(f"labeled/{self.file_name}.txt", "r") as f:
             for row in f:
@@ -24,9 +42,21 @@ class LabelsToNP:
         return np.array(labels)
           
     def save_as_npy(self, arr: np.ndarray) -> None:
+        """
+        Save the array
+
+        Parameters
+        ----------
+        arr: np.ndarray
+            Array to save
+        """
         np.save(f"labeled/{self.file_name}.npy", arr)
     
-    def main(self) -> np.ndarray:
+    def main(self) -> None:
+        """
+        Verify if the .npy version of the labels already exists
+         if so, return. If not, get the labels, convert and save
+        """
         if os.path.isfile(f"{self.file_name}.npy"):
             return
         
@@ -95,11 +125,16 @@ class HEVCDataloader(Dataset):
         """
         return self
     
-    def __next__(self):
+    def __next__(self) -> Tuple[np.ndarray, np.ndarray]:
         """
         Gets the next batch data by reading self.capture for self.batch_size frames
         Gets the batch labels by indexing the self.video_labels array
         Transforms the batches to conform by pytorch input (batch_size, channels, height, width)
+
+        Returns
+        ----------
+        Tuple[np.ndarray, np.ndarray]
+            Array of batch data, Array of batch labels 
         """
         if self.capture is None:
             raise StopIteration
@@ -152,7 +187,20 @@ class Net(nn.Module):
         self.fc1 = nn.Linear(128 * 55 * 73, 256)
         self.fc2 = nn.Linear(256, 2)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass
+
+        Parameters
+        ----------
+        x: torch.Tensor
+            input tensor
+
+        Returns
+        ----------
+        torch.Tensor
+            output tensor
+        """
         x = F.relu(self.conv1(x))
         x = F.relu(self.conv2(x))
         x = F.relu(self.conv3(x))
@@ -168,8 +216,15 @@ class Net(nn.Module):
         return x
 
 
-if __name__ == "__main__":
-    file_paths = ["0.hevc", "1.hevc", "2.hevc", "3.hevc", "4.hevc"]
+def _test(file_paths: List[str] = ["0.hevc"]) -> None:
+    """
+    Validate the dataloader and net by checking input and output sizes
+
+    Parameters
+    ----------
+    file_paths: List[str]
+        List of file paths
+    """
     dataloader = HEVCDataloader(file_paths)
     CNN_model = Net()
     
@@ -185,3 +240,15 @@ if __name__ == "__main__":
     input = torch.randn(4, 3, 874, 1164)
     output = CNN_model(input)
     assert output.size() == torch.Size([4, 2]), "Output size is off."
+
+
+if __name__ == "__main__":
+    _test()
+
+    file_paths = ["0.hevc", "1.hevc", "2.hevc", "3.hevc", "4.hevc"]
+    dataloader = HEVCDataloader(file_paths)
+    CNN_model = Net()
+    
+    for batch_input, batch_labels in dataloader:
+        break
+    
