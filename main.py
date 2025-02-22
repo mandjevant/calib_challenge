@@ -4,11 +4,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 import os
 from typing import List, Callable
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 import torch
 
 
 class LabelsToNP:
+    """
+    Read labels from .txt, convert to np.ndarray and save to .npy
+    """
     def __init__(self, file_name: str):
         self.file_name: str = file_name[:-5]
 
@@ -32,7 +35,24 @@ class LabelsToNP:
     
 
 class HEVCDataloader(Dataset):
+    """
+    HEVC Dataloader class. 
+     Iterates over frames in .hevc over list of .hevc files
+     For each .hevc finds the corresponding labels
+     Creates and returns batches of size batch_size
+    """
+
     def __init__(self, file_names: List[str], batch_size: int=8, transform: Callable=None):
+        """
+        Parameters
+        ----------
+        file_names: List[str]
+            list of .hevc file names
+        batch_size: int
+            desired batch size
+        transform: Callable
+            transformation to apply
+        """
         self.file_names: List[str] = file_names
         self.batch_size: int = batch_size
         self.transform: Callable = transform
@@ -47,7 +67,11 @@ class HEVCDataloader(Dataset):
 
         self._open_next_hevc()
 
-    def _open_next_hevc(self):
+    def _open_next_hevc(self) -> None:
+        """
+        Open the next .hevc file and set self.capture to read the frames
+        Subsequently, find and set the labels for this .hevc
+        """
         if self.capture is not None:
             self.capture.release()
         
@@ -66,9 +90,17 @@ class HEVCDataloader(Dataset):
         self.frame_idx = 0
 
     def __iter__(self):
+        """
+        Convert the object to an iterator (similar to pytorch's DataLoader)
+        """
         return self
     
     def __next__(self):
+        """
+        Gets the next batch data by reading self.capture for self.batch_size frames
+        Gets the batch labels by indexing the self.video_labels array
+        Transforms the batches to conform by pytorch input (batch_size, channels, height, width)
+        """
         if self.capture is None:
             raise StopIteration
         
@@ -95,7 +127,7 @@ class HEVCDataloader(Dataset):
         
         batch_frames = np.array(batch_frames)
         batch_frames = torch.from_numpy(batch_frames).permute(0, 3, 1, 2).float()
-        batch_labels = torch.tensor(batch_labels).long()
+        batch_labels = torch.tensor(np.array(batch_labels)).long()
 
         if len(batch_labels) < self.batch_size:
             raise StopIteration
@@ -103,6 +135,53 @@ class HEVCDataloader(Dataset):
         return batch_frames, batch_labels
 
 
+class Net(nn.Module):
+    """
+    Simple CNN with downsampling and dropout.
+    Supports input of (B, 3, 874, 1164) and gives output (B, 2)
+    """
+
+    def __init__(self):
+        super().__init__()
+
+        self.conv1 = nn.Conv2d(3, 32, kernel_size=5, stride=2, padding=2)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1)
+        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1)
+        self.pool = nn.MaxPool2d(2, 2)
+        self.dropout = nn.Dropout(0.3)
+        self.fc1 = nn.Linear(128 * 55 * 73, 256)
+        self.fc2 = nn.Linear(256, 2)
+
+    def forward(self, x):
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = F.relu(self.conv3(x))
+
+        x = self.pool(x)
+        x = self.dropout(x)
+
+        x = torch.flatten(x, start_dim=1)
+        x = F.relu(self.fc1(x))
+        x = self.dropout(x)
+
+        x = self.fc2(x)
+        return x
+
+
 if __name__ == "__main__":
     file_paths = ["0.hevc", "1.hevc", "2.hevc", "3.hevc", "4.hevc"]
     dataloader = HEVCDataloader(file_paths)
+    CNN_model = Net()
+    
+    for batch_input, batch_labels in dataloader:
+        break
+    
+    assert batch_input.size()[0]==batch_labels.size()[0], "Dataloader sizes are off."
+    assert batch_input.size() == torch.Size([batch_input.size()[0], 3, 874, 1164]), "Dataloader input size is off."
+    assert batch_labels.size() == torch.Size([batch_input.size()[0], 2]), "Dataloader label size is off."
+    input = torch.randn(8, 3, 874, 1164)
+    output = CNN_model(input)
+    assert output.size() == torch.Size([8, 2]), "Output size is off."
+    input = torch.randn(4, 3, 874, 1164)
+    output = CNN_model(input)
+    assert output.size() == torch.Size([4, 2]), "Output size is off."
