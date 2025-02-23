@@ -82,6 +82,7 @@ class HEVCDataloader(Dataset):
         batch_size: int = 8,
         transform: Callable = None,
         num_epochs: int = 1,
+        test: bool = False,
     ):
         """
         Parameters
@@ -94,20 +95,25 @@ class HEVCDataloader(Dataset):
             Transformation to apply
         num_epochs: int
             Number of epochs
+        test: bool
+            Whether the dataloader is for testing loop
         """
         self.file_names: List[str] = file_names
         self.batch_size: int = batch_size
         self.transform: Callable = transform
         self.num_epochs: int = num_epochs
+        self.test: bool = test
 
         self.video_idx: int = 0
         self.frame_idx: int = 0
         self.epoch_idx: int = 0
         self.capture: cv2.VideoCapture = None
         self.video_labels: np.ndarray = None
+        self.path_prefix: str = "labeled" if self.test is False else "unlabeled"
 
-        for file_name in self.file_names:
-            LabelsToNP(file_name).main()
+        if self.test is False:
+            for file_name in self.file_names:
+                LabelsToNP(file_name).main()
 
         self._open_next_hevc()
 
@@ -120,19 +126,20 @@ class HEVCDataloader(Dataset):
             self.capture.release()
 
         if self.video_idx >= len(self.file_names):
-            if self.epoch_idx >= self.num_epochs:
+            if self.epoch_idx >= self.num_epochs - 1:
                 self.capture = None
                 return
             self.video_idx = 0
             self.epoch_idx += 1
 
-        video_path = f"labeled/{self.file_names[self.video_idx]}"
+        video_path = f"{self.path_prefix}/{self.file_names[self.video_idx]}"
         self.capture = cv2.VideoCapture(video_path)
 
         if not self.capture.isOpened():
             raise ValueError(f"Could not open video: {video_path}")
 
-        self.video_labels = np.load(f"{video_path.replace('.hevc', '.npy')}")
+        if self.test is False:
+            self.video_labels = np.load(f"{video_path.replace('.hevc', '.npy')}")
         self.video_idx += 1
         self.frame_idx = 0
 
@@ -170,8 +177,11 @@ class HEVCDataloader(Dataset):
             if self.transform:
                 frame = self.transform(frame)
 
-            label = self.video_labels[self.frame_idx]
-            if any([~np.isnan(i) for i in label]):
+            label = np.array([np.nan, np.nan])
+            if self.test is False:
+                label = self.video_labels[self.frame_idx]
+
+            if self.test or any([~np.isnan(i) for i in label]):
                 batch_labels.append(label)
                 batch_frames.append(frame)
             self.frame_idx += 1
@@ -299,6 +309,8 @@ def train(
         Loss criterion
     batch_size: int
         Desired batch size
+    device: str
+        Whether to use the GPU
     """
     dataloader = HEVCDataloader(file_paths, batch_size, num_epochs=num_epochs)
     val_dataloader = HEVCDataloader(val_file_paths, batch_size, num_epochs=num_epochs)
@@ -346,6 +358,66 @@ def train(
     torch.save(model.state_dict(), "model/modelParams.pth")
 
 
+def write_predictions(file_path: str, predictions: List[List[str]]):
+    """
+    Save the predictions
+
+    Parameters
+    ----------
+    file_path: str
+        File path of test .hevc for naming convention
+    predictions: List[List[str]]
+        A list of predictions for each frame in the hevc
+    """
+    with open(f"unlabeled/{file_path.replace('.hevc', '.txt')}", "w") as f:
+        for pred in predictions:
+            f.write(" ".join(pred) + "\n")
+
+
+def test(
+    file_path: str,
+    model: nn.Module,
+    batch_size: int = 8,
+    device: str = "cpu",
+):
+    """
+    Initiate the dataloader
+    Execute the test loop
+    Format and write the predictions
+
+    Parameters
+    ----------
+    file_path: str
+        File path of test set to get predictions on
+    model: nn.Module
+        CNN to use
+    batch_size: int
+        Desired batch size
+    device: str
+        Whether to use the GPU
+    """
+    assert isinstance(
+        file_path, str
+    ), "file_path must be string. For writing the result."
+    test_dataloader = HEVCDataloader([file_path], batch_size, test=True)
+
+    if os.path.isfile("/model/modelParams.pth"):
+        raise FileNotFoundError("Model parameters not found, run train() first.")
+
+    predictions = list()
+    with torch.no_grad():
+        model.load_state_dict(torch.load("./model/modelParams.pth", weights_only=True))
+        model.eval()
+
+        for batch_input, _ in test_dataloader:
+            batch_input = batch_input.to(device)
+            model_output = model(batch_input)
+            for loss in model_output:
+                predictions.append([f"{float(i):.18e}" for i in loss])
+
+    write_predictions(file_path, predictions)
+
+
 if __name__ == "__main__":
     device = "cpu"
     if torch.cuda.is_available():
@@ -357,8 +429,10 @@ if __name__ == "__main__":
     CNN = Net()
     CNN.to(device)
     torch.backends.cudnn.benchmark = True
+    torch.set_printoptions(precision=18, sci_mode=True)
     file_paths = ["0.hevc", "1.hevc", "2.hevc", "3.hevc"]
     val_file_paths = ["4.hevc"]
+    test_file_paths = ["5.hevc", "6.hevc", "7.hevc", "8.hevc", "9.hevc"]
     optimizer = torch.optim.SGD(
         CNN.parameters(), lr=0.001, momentum=0.9, weight_decay=0.01
     )
@@ -371,3 +445,6 @@ if __name__ == "__main__":
         batch_size=32,
         device=device,
     )
+
+    for file_path in test_file_paths:
+        test(file_path, CNN, device=device)
