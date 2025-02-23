@@ -9,6 +9,7 @@ import torch.optim.sgd
 from torch.utils.data import Dataset
 import torch
 import tqdm
+import math
 
 
 class LabelsToNP:
@@ -76,7 +77,11 @@ class HEVCDataloader(Dataset):
     """
 
     def __init__(
-        self, file_names: List[str], batch_size: int = 8, transform: Callable = None
+        self,
+        file_names: List[str],
+        batch_size: int = 8,
+        transform: Callable = None,
+        num_epochs: int = 1,
     ):
         """
         Parameters
@@ -87,13 +92,17 @@ class HEVCDataloader(Dataset):
             Desired batch size
         transform: Callable
             Transformation to apply
+        num_epochs: int
+            Number of epochs
         """
         self.file_names: List[str] = file_names
         self.batch_size: int = batch_size
         self.transform: Callable = transform
+        self.num_epochs: int = num_epochs
 
         self.video_idx: int = 0
         self.frame_idx: int = 0
+        self.epoch_idx: int = 0
         self.capture: cv2.VideoCapture = None
         self.video_labels: np.ndarray = None
 
@@ -111,8 +120,11 @@ class HEVCDataloader(Dataset):
             self.capture.release()
 
         if self.video_idx >= len(self.file_names):
-            self.capture = None
-            return
+            if self.epoch_idx >= self.num_epochs:
+                self.capture = None
+                return
+            self.video_idx = 0
+            self.epoch_idx += 1
 
         video_path = f"labeled/{self.file_names[self.video_idx]}"
         self.capture = cv2.VideoCapture(video_path)
@@ -189,9 +201,9 @@ class Net(nn.Module):
         self.conv1 = nn.Conv2d(3, 16, kernel_size=5, stride=2, padding=2)
         self.conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1)
         self.conv3 = nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1)
-        self.bn1 = nn.BatchNorm2d(16)
-        self.bn2 = nn.BatchNorm2d(32)
-        self.bn3 = nn.BatchNorm2d(64)
+        self.bn1 = nn.GroupNorm(8, 16)
+        self.bn2 = nn.GroupNorm(16, 32)
+        self.bn3 = nn.GroupNorm(32, 64)
         self.pool = nn.MaxPool2d(2, 2)
         self.dropout = nn.Dropout(0.1)
         self.fc1 = nn.Linear(64 * 55 * 73, 128)
@@ -258,20 +270,27 @@ def _test(file_paths: List[str] = ["0.hevc"]) -> None:
 
 def train(
     file_paths: List[str],
+    val_file_paths: List[str],
     model: nn.Module,
     num_epochs: int,
     optimizer: torch.optim.Optimizer,
     criterion: Callable = nn.MSELoss(),
     batch_size: int = 8,
+    device: str = "cpu",
 ):
     """
     Initiate the dataloader and CNN
     Define the optimizer and criterion
+    Execute the training loop;
+     improve conv2d backwards pass by using autocast
+     improve norm backwards pass by using groupnorm instead
 
     Parameters
     ----------
     file_paths: List[str]
-        List of file paths
+        List of file paths for training set
+    val_file_paths: List[str]
+        List of file paths for validation set
     model: nn.Module
         CNN to use
     optimizer: torch.optim.Optimizer
@@ -281,45 +300,74 @@ def train(
     batch_size: int
         Desired batch size
     """
-    dataloader = HEVCDataloader(file_paths, batch_size)
+    dataloader = HEVCDataloader(file_paths, batch_size, num_epochs=num_epochs)
+    val_dataloader = HEVCDataloader(val_file_paths, batch_size, num_epochs=num_epochs)
 
-    with open("log.txt", "w") as logfile:
-        for epoch in range(num_epochs):
-            running_loss = 0.0
+    for epoch in range(num_epochs):
+        running_loss = 0.0
+        running_vloss = 0.0
 
-            for inx, (batch_input, batch_labels) in tqdm.tqdm(enumerate(dataloader)):
-                optimizer.zero_grad()
+        for inx, (batch_input, batch_labels) in tqdm.tqdm(enumerate(dataloader)):
+            batch_input, batch_labels = batch_input.to(device), batch_labels.to(device)
+            optimizer.zero_grad()
 
+            with torch.amp.autocast(device_type=device):
                 model_output = model(batch_input)
                 loss = criterion(model_output, batch_labels)
-                loss.backward()
-                optimizer.step()
 
-                running_loss += loss.item()
+            loss.backward()
+            optimizer.step()
 
-                logfile.write(str(loss.item()))
-                logfile.write(str(model_output))
+            running_loss += loss.item()
 
-                if inx % 5 == 0:
+            if inx % math.floor(500 / batch_size) == 0:
+                print(
+                    f"[{epoch + 1}, {inx + 1:4d}] training loss: {running_loss / math.floor(500 / batch_size):.10f}"
+                )
+                running_loss = 0.0
+
+        with torch.no_grad():
+            for inx, (batch_input, batch_labels) in tqdm.tqdm(
+                enumerate(val_dataloader)
+            ):
+                batch_input, batch_labels = batch_input.to(device), batch_labels.to(
+                    device
+                )
+                model_output = model(batch_input)
+                loss = criterion(model_output, batch_labels)
+                running_vloss += loss.item()
+
+                if inx % math.floor(500 / batch_size) == 0:
                     print(
-                        f"[{epoch + 1}, {inx + 1:10d}] loss: {running_loss / (200/batch_size):.3f}"
+                        f"[{epoch + 1}, {inx + 1:4d}] valid loss: {running_vloss / math.floor(500 / batch_size):.10f}"
                     )
-                    running_loss = 0.0
+                    running_vloss = 0.0
 
     torch.save(model.state_dict(), "model/modelParams.pth")
 
 
 if __name__ == "__main__":
-    print(torch.cuda.is_available())
-    import sys
+    device = "cpu"
+    if torch.cuda.is_available():
+        device = "cuda"
 
-    sys.exit()
     _test()
 
     num_epochs = 3
     CNN = Net()
-    file_paths = ["0.hevc", "1.hevc", "2.hevc", "3.hevc", "4.hevc"]
+    CNN.to(device)
+    torch.backends.cudnn.benchmark = True
+    file_paths = ["0.hevc", "1.hevc", "2.hevc", "3.hevc"]
+    val_file_paths = ["4.hevc"]
     optimizer = torch.optim.SGD(
         CNN.parameters(), lr=0.001, momentum=0.9, weight_decay=0.01
     )
-    train(file_paths, CNN, num_epochs, optimizer, batch_size=32)
+    train(
+        file_paths,
+        val_file_paths,
+        CNN,
+        num_epochs,
+        optimizer,
+        batch_size=32,
+        device=device,
+    )
