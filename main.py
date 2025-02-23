@@ -3,7 +3,7 @@ import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 import os
-from typing import List, Callable,Tuple
+from typing import List, Callable, Tuple
 import torch.optim.optimizer
 import torch.optim.sgd
 from torch.utils.data import Dataset
@@ -41,9 +41,9 @@ class LabelsToNP:
         with open(f"labeled/{self.file_name}.txt", "r") as f:
             for row in f:
                 labels.append(np.array(list(map(float, row.split(" ")))))
-        
+
         return np.array(labels)
-          
+
     def save_as_npy(self, arr: np.ndarray) -> None:
         """
         Save the array
@@ -54,7 +54,7 @@ class LabelsToNP:
             Array to save
         """
         np.save(f"labeled/{self.file_name}.npy", arr)
-    
+
     def main(self) -> None:
         """
         Verify if the .npy version of the labels already exists
@@ -62,20 +62,22 @@ class LabelsToNP:
         """
         if os.path.isfile(f"{self.file_name}.npy"):
             return
-        
+
         labels = self.read_from_txt_convert_to_np()
         self.save_as_npy(labels)
-    
+
 
 class HEVCDataloader(Dataset):
     """
-    HEVC Dataloader class. 
+    HEVC Dataloader class.
      Iterates over frames in .hevc over list of .hevc files
      For each .hevc finds the corresponding labels
      Creates and returns batches of size batch_size
     """
 
-    def __init__(self, file_names: List[str], batch_size: int=8, transform: Callable=None):
+    def __init__(
+        self, file_names: List[str], batch_size: int = 8, transform: Callable = None
+    ):
         """
         Parameters
         ----------
@@ -107,17 +109,17 @@ class HEVCDataloader(Dataset):
         """
         if self.capture is not None:
             self.capture.release()
-        
+
         if self.video_idx >= len(self.file_names):
             self.capture = None
             return
-        
+
         video_path = f"labeled/{self.file_names[self.video_idx]}"
         self.capture = cv2.VideoCapture(video_path)
 
         if not self.capture.isOpened():
             raise ValueError(f"Could not open video: {video_path}")
-        
+
         self.video_labels = np.load(f"{video_path.replace('.hevc', '.npy')}")
         self.video_idx += 1
         self.frame_idx = 0
@@ -127,7 +129,7 @@ class HEVCDataloader(Dataset):
         Convert the object to an iterator (similar to pytorch's DataLoader)
         """
         return self
-    
+
     def __next__(self) -> Tuple[np.ndarray, np.ndarray]:
         """
         Gets the next batch data by reading self.capture for self.batch_size frames
@@ -137,13 +139,13 @@ class HEVCDataloader(Dataset):
         Returns
         ----------
         Tuple[np.ndarray, np.ndarray]
-            Array of batch data, Array of batch labels 
+            Array of batch data, Array of batch labels
         """
         if self.capture is None:
             raise StopIteration
-        
+
         batch_frames = list()
-        batch_labels = list() 
+        batch_labels = list()
 
         while len(batch_frames) < self.batch_size:
             ret, frame = self.capture.read()
@@ -161,10 +163,10 @@ class HEVCDataloader(Dataset):
                 batch_labels.append(label)
                 batch_frames.append(frame)
             self.frame_idx += 1
-        
+
         if len(batch_frames) == 0:
             raise StopIteration
-        
+
         batch_frames = np.array(batch_frames)
         batch_frames = torch.from_numpy(batch_frames).permute(0, 3, 1, 2).float()
         batch_labels = torch.tensor(np.array(batch_labels)).float()
@@ -235,13 +237,17 @@ def _test(file_paths: List[str] = ["0.hevc"]) -> None:
     """
     dataloader = HEVCDataloader(file_paths)
     CNN_model = Net()
-    
+
     for batch_input, batch_labels in dataloader:
         break
-    
-    assert batch_input.size()[0]==batch_labels.size()[0], "Dataloader sizes are off."
-    assert batch_input.size() == torch.Size([batch_input.size()[0], 3, 874, 1164]), "Dataloader input size is off."
-    assert batch_labels.size() == torch.Size([batch_input.size()[0], 2]), "Dataloader label size is off."
+
+    assert batch_input.size()[0] == batch_labels.size()[0], "Dataloader sizes are off."
+    assert batch_input.size() == torch.Size(
+        [batch_input.size()[0], 3, 874, 1164]
+    ), "Dataloader input size is off."
+    assert batch_labels.size() == torch.Size(
+        [batch_input.size()[0], 2]
+    ), "Dataloader label size is off."
     input = torch.randn(8, 3, 874, 1164)
     output = CNN_model(input)
     assert output.size() == torch.Size([8, 2]), "Output size is off."
@@ -250,7 +256,14 @@ def _test(file_paths: List[str] = ["0.hevc"]) -> None:
     assert output.size() == torch.Size([4, 2]), "Output size is off."
 
 
-def train(file_paths: List[str], model: nn.Module, num_epochs: int, optimizer: torch.optim.Optimizer, criterion: Callable=nn.MSELoss(), batch_size: int=8):
+def train(
+    file_paths: List[str],
+    model: nn.Module,
+    num_epochs: int,
+    optimizer: torch.optim.Optimizer,
+    criterion: Callable = nn.MSELoss(),
+    batch_size: int = 8,
+):
     """
     Initiate the dataloader and CNN
     Define the optimizer and criterion
@@ -269,7 +282,7 @@ def train(file_paths: List[str], model: nn.Module, num_epochs: int, optimizer: t
         Desired batch size
     """
     dataloader = HEVCDataloader(file_paths, batch_size)
-    
+
     with open("log.txt", "w") as logfile:
         for epoch in range(num_epochs):
             running_loss = 0.0
@@ -287,19 +300,26 @@ def train(file_paths: List[str], model: nn.Module, num_epochs: int, optimizer: t
                 logfile.write(str(loss.item()))
                 logfile.write(str(model_output))
 
-                if inx % 5 ==0:
-                    print(f'[{epoch + 1}, {inx + 1:4d}] loss: {running_loss / (200/batch_size):.3f}')
+                if inx % 5 == 0:
+                    print(
+                        f"[{epoch + 1}, {inx + 1:10d}] loss: {running_loss / (200/batch_size):.3f}"
+                    )
                     running_loss = 0.0
 
     torch.save(model.state_dict(), "model/modelParams.pth")
 
-    
 
 if __name__ == "__main__":
+    print(torch.cuda.is_available())
+    import sys
+
+    sys.exit()
     _test()
 
-    num_epochs = 1
+    num_epochs = 3
     CNN = Net()
     file_paths = ["0.hevc", "1.hevc", "2.hevc", "3.hevc", "4.hevc"]
-    optimizer = torch.optim.SGD(CNN.parameters(), lr=0.001, momentum=0.9, weight_decay=0.01)
+    optimizer = torch.optim.SGD(
+        CNN.parameters(), lr=0.001, momentum=0.9, weight_decay=0.01
+    )
     train(file_paths, CNN, num_epochs, optimizer, batch_size=32)
